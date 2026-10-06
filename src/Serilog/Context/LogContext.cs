@@ -34,10 +34,14 @@ namespace Serilog.Context;
 /// </code>
 /// </example>
 /// <remarks>The scope of the context is the current logical thread, using AsyncLocal
-/// (and so is preserved across async/await calls).</remarks>
+/// (and so is preserved across async/await calls). Tokens returned by <c>Push</c> and
+/// <see cref="Suspend"/> are bound to the logical async context in which they were created
+/// and must be disposed in reverse (LIFO) order; out-of-order or repeated disposal is
+/// rejected with an <see cref="InvalidOperationException"/> and leaves all other scopes intact.</remarks>
 public static class LogContext
 {
     static readonly AsyncLocal<EnricherStack?> Data = new();
+    static readonly AsyncLocal<ContextStackBookmark?> ScopeData = new();
 
     /// <summary>
     /// Push a property onto the context, returning an <see cref="IDisposable"/>
@@ -72,9 +76,10 @@ public static class LogContext
         Guard.AgainstNull(enricher);
 
         var stack = GetOrCreateEnricherStack();
-        var bookmark = new ContextStackBookmark(stack);
+        var bookmark = new ContextStackBookmark(stack, CurrentScope);
 
         Enrichers = stack.Push(enricher);
+        CurrentScope = bookmark;
 
         return bookmark;
     }
@@ -110,7 +115,7 @@ public static class LogContext
     public static IDisposable Push(params ReadOnlySpan<ILogEventEnricher> enrichers)
     {
         var stack = GetOrCreateEnricherStack();
-        var bookmark = new ContextStackBookmark(stack);
+        var bookmark = new ContextStackBookmark(stack, CurrentScope);
 
         foreach (var enricher in enrichers)
         {
@@ -118,6 +123,7 @@ public static class LogContext
         }
 
         Enrichers = stack;
+        CurrentScope = bookmark;
 
         return bookmark;
     }
@@ -138,7 +144,7 @@ public static class LogContext
         Guard.AgainstNull(enrichers);
 
         var stack = GetOrCreateEnricherStack();
-        var bookmark = new ContextStackBookmark(stack);
+        var bookmark = new ContextStackBookmark(stack, CurrentScope);
 
         foreach (var enricher in enrichers)
         {
@@ -146,6 +152,7 @@ public static class LogContext
         }
 
         Enrichers = stack;
+        CurrentScope = bookmark;
 
         return bookmark;
     }
@@ -169,9 +176,10 @@ public static class LogContext
     public static IDisposable Suspend()
     {
         var stack = GetOrCreateEnricherStack();
-        var bookmark = new ContextStackBookmark(stack);
+        var bookmark = new ContextStackBookmark(stack, CurrentScope);
 
         Enrichers = EnricherStack.Empty;
+        CurrentScope = bookmark;
 
         return bookmark;
     }
@@ -213,15 +221,27 @@ public static class LogContext
     sealed class ContextStackBookmark : IDisposable
     {
         readonly EnricherStack _bookmark;
+        readonly ContextStackBookmark? _parent;
+        bool _disposed;
 
-        public ContextStackBookmark(EnricherStack bookmark)
+        public ContextStackBookmark(EnricherStack bookmark, ContextStackBookmark? parent)
         {
             _bookmark = bookmark;
+            _parent = parent;
         }
 
         public void Dispose()
         {
+            if (_disposed)
+                throw new InvalidOperationException("This LogContext scope has already been disposed.");
+
+            if (!ReferenceEquals(CurrentScope, this))
+                throw new InvalidOperationException(
+                    "LogContext scopes must be disposed in reverse order of creation, within the logical async context that created them.");
+
+            _disposed = true;
             Enrichers = _bookmark;
+            CurrentScope = _parent;
         }
     }
 
@@ -229,6 +249,12 @@ public static class LogContext
     {
         get => Data.Value;
         set => Data.Value = value;
+    }
+
+    static ContextStackBookmark? CurrentScope
+    {
+        get => ScopeData.Value;
+        set => ScopeData.Value = value;
     }
 }
 
