@@ -1,3 +1,23 @@
+namespace Serilog.Capturing
+{
+    public static class TemplateBinder
+    {
+        public static Serilog.Capturing.TemplateBindingReceipt Bind(Serilog.Events.MessageTemplate messageTemplate, params object?[] propertyValues) { }
+        [Serilog.Core.MessageTemplateFormatMethod("messageTemplate")]
+        public static Serilog.Capturing.TemplateBindingReceipt Bind(string messageTemplate, params object?[] propertyValues) { }
+    }
+    public sealed class TemplateBindingReceipt
+    {
+        public bool IsComplete { get; }
+        public System.Collections.Generic.IReadOnlyList<Serilog.Parsing.PropertyToken> MissingProperties { get; }
+        public System.Collections.Generic.IReadOnlyList<Serilog.Events.LogEventProperty> Properties { get; }
+        public Serilog.Events.MessageTemplate Template { get; }
+        public System.Collections.Generic.IReadOnlyList<object?> UnmatchedValues { get; }
+        public string Render(System.IFormatProvider? formatProvider = null) { }
+        public void Render(System.IO.TextWriter output, System.IFormatProvider? formatProvider = null) { }
+        public Serilog.Events.LogEvent ToLogEvent(Serilog.Events.LogEventLevel level = 2, System.Exception? exception = null) { }
+    }
+}
 namespace Serilog.Configuration
 {
     public class BatchingOptions
