@@ -291,6 +291,234 @@ public class LogContextTests
         }
     }
 
+    [Fact]
+    public async Task TwoTasksUsingSameKeyDoNotMixValues()
+    {
+        LogEvent? lastEventT1 = null;
+        LogEvent? lastEventT2 = null;
+
+        // Two concurrently-running tasks that push the same property name must not observe each
+        // other's values. AsyncLocal flows copy-on-write, so each task gets its own scope.
+        var t1 = Task.Run(async () =>
+        {
+            using (LogContext.PushProperty("Shared", 1))
+            {
+                await Task.Delay(1);
+                var log = new LoggerConfiguration()
+                    .Enrich.FromLogContext()
+                    .WriteTo.Sink(new DelegatingSink(e => lastEventT1 = e))
+                    .CreateLogger();
+                log.Write(Some.InformationEvent());
+            }
+        });
+
+        var t2 = Task.Run(async () =>
+        {
+            using (LogContext.PushProperty("Shared", 2))
+            {
+                await Task.Delay(1);
+                var log = new LoggerConfiguration()
+                    .Enrich.FromLogContext()
+                    .WriteTo.Sink(new DelegatingSink(e => lastEventT2 = e))
+                    .CreateLogger();
+                log.Write(Some.InformationEvent());
+            }
+        });
+
+        await Task.WhenAll(t1, t2);
+
+        Assert.NotNull(lastEventT1);
+        Assert.Equal(1, lastEventT1!.Properties["Shared"].LiteralValue());
+        Assert.NotNull(lastEventT2);
+        Assert.Equal(2, lastEventT2!.Properties["Shared"].LiteralValue());
+    }
+
+    [Fact]
+    public void InnerScopeRestoresOuterScopeOnDispose()
+    {
+        LogEvent? lastEvent = null;
+
+        var log = new LoggerConfiguration()
+            .Enrich.FromLogContext()
+            .WriteTo.Sink(new DelegatingSink(e => lastEvent = e))
+            .CreateLogger();
+
+        using (LogContext.PushProperty("Outer", "out"))
+        {
+            log.Write(Some.InformationEvent());
+            Assert.Equal("out", lastEvent!.Properties["Outer"].LiteralValue());
+
+            using (LogContext.PushProperty("Inner", "in"))
+            {
+                log.Write(Some.InformationEvent());
+                Assert.Equal("out", lastEvent.Properties["Outer"].LiteralValue());
+                Assert.Equal("in", lastEvent.Properties["Inner"].LiteralValue());
+            }
+
+            // Inner scope disposed: outer scope must be restored, inner gone.
+            log.Write(Some.InformationEvent());
+            Assert.Equal("out", lastEvent.Properties["Outer"].LiteralValue());
+            Assert.False(lastEvent.Properties.ContainsKey("Inner"));
+        }
+
+        // Outer scope disposed: both gone.
+        log.Write(Some.InformationEvent());
+        Assert.False(lastEvent.Properties.ContainsKey("Outer"));
+    }
+
+    [Fact]
+    public void OutOfOrderDisposeIsRejectedAndOuterScopeRemainsIntact()
+    {
+        LogEvent? lastEvent = null;
+
+        var log = new LoggerConfiguration()
+            .Enrich.FromLogContext()
+            .WriteTo.Sink(new DelegatingSink(e => lastEvent = e))
+            .CreateLogger();
+
+        var outer = LogContext.PushProperty("Outer", "out");
+        var inner = LogContext.PushProperty("Inner", "in");
+
+        // Disposing the outer (while inner is still on top) is out of order and must be rejected.
+        Assert.Throws<InvalidOperationException>(() => outer.Dispose());
+
+        // The failed dispose must not have damaged the inner scope.
+        log.Write(Some.InformationEvent());
+        Assert.Equal("in", lastEvent!.Properties["Inner"].LiteralValue());
+        Assert.Equal("out", lastEvent.Properties["Outer"].LiteralValue());
+
+        // The inner scope can still be disposed in order.
+        inner.Dispose();
+        log.Write(Some.InformationEvent());
+        Assert.False(lastEvent.Properties.ContainsKey("Inner"));
+        Assert.Equal("out", lastEvent.Properties["Outer"].LiteralValue());
+
+        // And then the outer scope, also in order.
+        outer.Dispose();
+        log.Write(Some.InformationEvent());
+        Assert.False(lastEvent.Properties.ContainsKey("Outer"));
+    }
+
+    [Fact]
+    public void DuplicateDisposeIsRejectedAndOuterScopeRemainsIntact()
+    {
+        LogEvent? lastEvent = null;
+
+        var log = new LoggerConfiguration()
+            .Enrich.FromLogContext()
+            .WriteTo.Sink(new DelegatingSink(e => lastEvent = e))
+            .CreateLogger();
+
+        var outer = LogContext.PushProperty("Outer", "out");
+        var inner = LogContext.PushProperty("Inner", "in");
+
+        // Dispose in order.
+        inner.Dispose();
+        outer.Dispose();
+
+        // Disposing the same scope twice must be rejected.
+        Assert.Throws<ObjectDisposedException>(() => inner.Dispose());
+        Assert.Throws<ObjectDisposedException>(() => outer.Dispose());
+
+        // The failed disposes must not have left the context in a bad state. Pushing a fresh scope
+        // still works and is restored correctly.
+        using (LogContext.PushProperty("Fresh", "yes"))
+        {
+            log.Write(Some.InformationEvent());
+            Assert.Equal("yes", lastEvent!.Properties["Fresh"].LiteralValue());
+        }
+
+        log.Write(Some.InformationEvent());
+        Assert.False(lastEvent.Properties.ContainsKey("Fresh"));
+    }
+
+    [Fact]
+    public void OutOfOrderDisposeOfBatchIsRejectedAndOtherScopesRemainIntact()
+    {
+        LogEvent? lastEvent = null;
+
+        var log = new LoggerConfiguration()
+            .Enrich.FromLogContext()
+            .WriteTo.Sink(new DelegatingSink(e => lastEvent = e))
+            .CreateLogger();
+
+        var single = LogContext.PushProperty("Single", 1);
+        var batch = LogContext.Push(
+            new PropertyEnricher("BatchA", 2),
+            new PropertyEnricher("BatchB", 3));
+
+        // Disposing the single (while the batch is on top) is out of order.
+        Assert.Throws<InvalidOperationException>(() => single.Dispose());
+
+        // The batch and the single must both still be present.
+        log.Write(Some.InformationEvent());
+        Assert.Equal(1, lastEvent!.Properties["Single"].LiteralValue());
+        Assert.Equal(2, lastEvent.Properties["BatchA"].LiteralValue());
+        Assert.Equal(3, lastEvent.Properties["BatchB"].LiteralValue());
+
+        // Dispose in order: batch first, then single.
+        batch.Dispose();
+        single.Dispose();
+
+        log.Write(Some.InformationEvent());
+        Assert.False(lastEvent.Properties.ContainsKey("Single"));
+        Assert.False(lastEvent.Properties.ContainsKey("BatchA"));
+        Assert.False(lastEvent.Properties.ContainsKey("BatchB"));
+    }
+
+    [Fact]
+    public async Task ScopeFlowsAcrossAwaitAndRestoresAfterContinuation()
+    {
+        LogEvent? lastEvent = null;
+
+        var log = new LoggerConfiguration()
+            .Enrich.FromLogContext()
+            .WriteTo.Sink(new DelegatingSink(e => lastEvent = e))
+            .CreateLogger();
+
+        using (LogContext.PushProperty("Flow", "yes"))
+        {
+            await Task.Yield();
+
+            log.Write(Some.InformationEvent());
+            Assert.Equal("yes", lastEvent!.Properties["Flow"].LiteralValue());
+        }
+
+        log.Write(Some.InformationEvent());
+        Assert.False(lastEvent.Properties.ContainsKey("Flow"));
+    }
+
+    [Fact]
+    public void SuspendDisposeRejectsOutOfOrderPush()
+    {
+        LogEvent? lastEvent = null;
+
+        var log = new LoggerConfiguration()
+            .Enrich.FromLogContext()
+            .WriteTo.Sink(new DelegatingSink(e => lastEvent = e))
+            .CreateLogger();
+
+        using (LogContext.PushProperty("Outer", "out"))
+        {
+            var suspend = LogContext.Suspend();
+
+            // Pushing during suspend means the suspend bookmark is no longer the current top.
+            var inner = LogContext.PushProperty("Inner", "in");
+
+            Assert.Throws<InvalidOperationException>(() => suspend.Dispose());
+
+            // The inner scope is unaffected and can be disposed in order.
+            inner.Dispose();
+
+            // Now the suspend bookmark is back on top and can be disposed in order.
+            suspend.Dispose();
+
+            log.Write(Some.InformationEvent());
+            Assert.Equal("out", lastEvent!.Properties["Outer"].LiteralValue());
+            Assert.False(lastEvent.Properties.ContainsKey("Inner"));
+        }
+    }
+
 #if TEST_FEATURE_APPDOMAIN
     // Must not actually try to pass context across domains,
     // since user property types may not be serializable.

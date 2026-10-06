@@ -32,6 +32,21 @@ namespace Serilog.Context;
 ///     Log.Information("The MessageId property will be attached to this event");
 /// }
 /// </code>
+/// The scope returned by <see cref="PushProperty"/> is a credential bound to the current async
+/// logical call context, so it flows across <c>await</c> points. Disposing a credential that is not
+/// the current top of the stack (out-of-order dispose), or disposing the same credential twice
+/// (duplicate dispose), is rejected and does not affect any other scope:
+/// <code lang="C#">
+/// var outer = LogContext.PushProperty("Outer", 1);
+/// var inner = LogContext.PushProperty("Inner", 2);
+///
+/// outer.Dispose(); // Throws InvalidOperationException: inner is still on top
+///
+/// inner.Dispose(); // OK: inner is popped first
+/// outer.Dispose(); // OK: outer is popped next
+///
+/// outer.Dispose(); // Throws ObjectDisposedException: already disposed
+/// </code>
 /// </example>
 /// <remarks>The scope of the context is the current logical thread, using AsyncLocal
 /// (and so is preserved across async/await calls).</remarks>
@@ -71,10 +86,11 @@ public static class LogContext
     {
         Guard.AgainstNull(enricher);
 
-        var stack = GetOrCreateEnricherStack();
-        var bookmark = new ContextStackBookmark(stack);
+        var previous = GetOrCreateEnricherStack();
+        var expected = previous.Push(enricher);
+        var bookmark = new ContextStackBookmark(previous, expected);
 
-        Enrichers = stack.Push(enricher);
+        Enrichers = expected;
 
         return bookmark;
     }
@@ -109,15 +125,17 @@ public static class LogContext
     [OverloadResolutionPriority(2)]
     public static IDisposable Push(params ReadOnlySpan<ILogEventEnricher> enrichers)
     {
-        var stack = GetOrCreateEnricherStack();
-        var bookmark = new ContextStackBookmark(stack);
+        var previous = GetOrCreateEnricherStack();
+        var expected = previous;
 
         foreach (var enricher in enrichers)
         {
-            stack = stack.Push(enricher);
+            expected = expected.Push(enricher);
         }
 
-        Enrichers = stack;
+        var bookmark = new ContextStackBookmark(previous, expected);
+
+        Enrichers = expected;
 
         return bookmark;
     }
@@ -137,15 +155,17 @@ public static class LogContext
     {
         Guard.AgainstNull(enrichers);
 
-        var stack = GetOrCreateEnricherStack();
-        var bookmark = new ContextStackBookmark(stack);
+        var previous = GetOrCreateEnricherStack();
+        var expected = previous;
 
         foreach (var enricher in enrichers)
         {
-            stack = stack.Push(enricher);
+            expected = expected.Push(enricher);
         }
 
-        Enrichers = stack;
+        var bookmark = new ContextStackBookmark(previous, expected);
+
+        Enrichers = expected;
 
         return bookmark;
     }
@@ -168,8 +188,8 @@ public static class LogContext
     /// <returns>A token that must be disposed, in order, to restore properties back to the stack.</returns>
     public static IDisposable Suspend()
     {
-        var stack = GetOrCreateEnricherStack();
-        var bookmark = new ContextStackBookmark(stack);
+        var previous = GetOrCreateEnricherStack();
+        var bookmark = new ContextStackBookmark(previous, EnricherStack.Empty);
 
         Enrichers = EnricherStack.Empty;
 
@@ -210,18 +230,41 @@ public static class LogContext
         }
     }
 
+    /// <summary>
+    /// An <see cref="IDisposable"/> that acts as a credential for a pushed scope. Disposing the
+    /// bookmark removes the scope it represents, along with any scopes pushed on top of it.
+    /// </summary>
+    /// <remarks>
+    /// The bookmark is bound to the current async logical call context via <see cref="AsyncLocal{T}"/>,
+    /// so the scope it represents flows across <c>await</c> points. Disposing a bookmark that is not the
+    /// current top of the stack (out-of-order dispose), or disposing the same bookmark twice (duplicate
+    /// dispose), is rejected and does not affect any other scope.
+    /// </remarks>
     sealed class ContextStackBookmark : IDisposable
     {
-        readonly EnricherStack _bookmark;
+        readonly EnricherStack _previous;
+        readonly EnricherStack _expected;
+        bool _disposed;
 
-        public ContextStackBookmark(EnricherStack bookmark)
+        public ContextStackBookmark(EnricherStack previous, EnricherStack expected)
         {
-            _bookmark = bookmark;
+            _previous = previous;
+            _expected = expected;
         }
 
         public void Dispose()
         {
-            Enrichers = _bookmark;
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(ContextStackBookmark), "The scope has already been disposed.");
+
+            // The bookmark is only valid if the stack it represents is still the current top. If any
+            // other scope was pushed on top and not yet popped, the stack will differ from the one we
+            // expect, and disposing now would remove that scope too. Reject instead.
+            if (Enrichers != _expected)
+                throw new InvalidOperationException("The scope cannot be disposed because other scopes have been pushed on top of it. Dispose scopes in the reverse order of their creation.");
+
+            _disposed = true;
+            Enrichers = _previous;
         }
     }
 
