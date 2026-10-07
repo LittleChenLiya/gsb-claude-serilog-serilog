@@ -259,6 +259,25 @@ public class LoggerSinkConfiguration
     }
 
     /// <summary>
+    /// Write to a sink, exposing only the selected top-level properties on each log event. The original
+    /// events are not modified, so other sinks still observe all properties. The projected events retain
+    /// the original timestamp, level, exception, and message template; template parameters that are not
+    /// selected will render in their raw, unbound form (e.g. <c>{Name}</c>).
+    /// </summary>
+    /// <param name="propertyNames">The names of the top-level properties to expose to the configured sink.</param>
+    /// <param name="configureSink">An action that configures the wrapped sink.</param>
+    /// <returns>Configuration object allowing method chaining.</returns>
+    /// <exception cref="ArgumentNullException">When <paramref name="propertyNames"/> is <code>null</code>.</exception>
+    /// <exception cref="ArgumentNullException">When <paramref name="configureSink"/> is <code>null</code>.</exception>
+    public LoggerConfiguration SelectProperties(string[] propertyNames, Action<LoggerSinkConfiguration> configureSink)
+    {
+        Guard.AgainstNull(propertyNames);
+        Guard.AgainstNull(configureSink);
+
+        return Sink(Wrap(s => new ProjectingSink(s, propertyNames), configureSink));
+    }
+
+    /// <summary>
     /// Write to a sink, and if the sink is unable to record the event, write to a second sink. Additional sinks can
     /// be added to the chain if necessary.
     /// </summary>
