@@ -80,6 +80,7 @@ namespace Serilog.Configuration
     }
     public class LoggerSinkConfiguration
     {
+        public Serilog.LoggerConfiguration Aggregate(System.Action<Serilog.Configuration.LoggerSinkConfiguration> configureSinks, Serilog.Events.LogEventLevel restrictedToMinimumLevel = 0, Serilog.Core.LoggingLevelSwitch? levelSwitch = null) { }
         public Serilog.LoggerConfiguration Conditional(System.Func<Serilog.Events.LogEvent, bool> condition, System.Action<Serilog.Configuration.LoggerSinkConfiguration> configureSink) { }
         public Serilog.LoggerConfiguration FallbackChain(System.Action<Serilog.Configuration.LoggerSinkConfiguration> configureSink, System.Action<Serilog.Configuration.LoggerSinkConfiguration> configureFallback, params System.Action<Serilog.Configuration.LoggerSinkConfiguration>[] configureSubsequentFallbacks) { }
         public Serilog.LoggerConfiguration Fallible(System.Action<Serilog.Configuration.LoggerSinkConfiguration> configureSink, Serilog.Core.ILoggingFailureListener failureListener) { }
@@ -348,6 +349,16 @@ namespace Serilog.Core.Enrichers
     {
         public PropertyEnricher(string name, object? value, bool destructureObjects = false) { }
         public void Enrich(Serilog.Events.LogEvent logEvent, Serilog.Core.ILogEventPropertyFactory propertyFactory) { }
+    }
+}
+namespace Serilog.Core.Sinks
+{
+    public sealed class AggregatingSink : Serilog.Core.ILogEventSink, System.IAsyncDisposable, System.IDisposable
+    {
+        public AggregatingSink(System.Collections.Generic.IEnumerable<Serilog.Core.ILogEventSink> sinks) { }
+        public void Dispose() { }
+        public System.Threading.Tasks.ValueTask DisposeAsync() { }
+        public void Emit(Serilog.Events.LogEvent logEvent) { }
     }
 }
 namespace Serilog.Data

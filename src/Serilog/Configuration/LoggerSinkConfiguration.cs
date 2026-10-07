@@ -259,6 +259,45 @@ public class LoggerSinkConfiguration
     }
 
     /// <summary>
+    /// Write log events to multiple sinks synchronously through an <see cref="AggregatingSink"/>. Every
+    /// configured sink is attempted exactly once for each event, in configuration order; events are neither
+    /// copied nor re-sent. Once all sinks have been attempted, failures are reported to the caller: a single
+    /// failure preserves its original cause, while multiple failures are aggregated into an
+    /// <see cref="AggregateException"/> in configuration order. Failures encountered while disposing the
+    /// configured sinks are aggregated and reported separately from emission failures.
+    /// </summary>
+    /// <param name="configureSinks">An action that configures the sinks to write to. The argument to the
+    /// callback supports the same syntax as the <c>WriteTo</c> configuration object.</param>
+    /// <param name="restrictedToMinimumLevel">The minimum level for
+    /// events passed through the sink. Ignored when <paramref name="levelSwitch"/> is specified.</param>
+    /// <param name="levelSwitch">A switch allowing the pass-through minimum level
+    /// to be changed at runtime. Can be <code>null</code></param>
+    /// <returns>Configuration object allowing method chaining.</returns>
+    /// <exception cref="ArgumentNullException">When <paramref name="configureSinks"/> is <code>null</code>.</exception>
+    public LoggerConfiguration Aggregate(
+        Action<LoggerSinkConfiguration> configureSinks,
+        LogEventLevel restrictedToMinimumLevel = LevelAlias.Minimum,
+        LoggingLevelSwitch? levelSwitch = null)
+    {
+        Guard.AgainstNull(configureSinks);
+
+        var sinksToWrap = new List<ILogEventSink>();
+
+        var capturingConfiguration = new LoggerConfiguration();
+        var capturingLoggerSinkConfiguration = new LoggerSinkConfiguration(
+            capturingConfiguration,
+            sinksToWrap.Add);
+
+        // `WriteTo.Sink()` will return the capturing configuration; this ensures chained `WriteTo` gets back
+        // to the capturing sink configuration, enabling `WriteTo.X().WriteTo.Y()`.
+        capturingConfiguration.WriteTo = capturingLoggerSinkConfiguration;
+
+        configureSinks(capturingLoggerSinkConfiguration);
+
+        return Sink(new AggregatingSink(sinksToWrap), restrictedToMinimumLevel, levelSwitch);
+    }
+
+    /// <summary>
     /// Write to a sink, and if the sink is unable to record the event, write to a second sink. Additional sinks can
     /// be added to the chain if necessary.
     /// </summary>
