@@ -259,6 +259,33 @@ public class LoggerSinkConfiguration
     }
 
     /// <summary>
+    /// Write to a sink, projecting each log event down to an explicit selection of top-level
+    /// properties. The projected event retains the original timestamp, level, exception, and
+    /// message template; tokens in the message template that are bound to selected properties
+    /// render normally, while tokens bound to unselected properties render in their original,
+    /// unbound form. Selected property values are passed through by reference, so structured
+    /// values are preserved and not converted to strings. The original log event is not
+    /// modified, and other sinks in the pipeline are unaffected.
+    /// </summary>
+    /// <param name="propertyNames">The names of the top-level properties to retain on events
+    /// passed to the configured sink.</param>
+    /// <param name="configureSink">An action that configures the wrapped sink.</param>
+    /// <returns>Configuration object allowing method chaining.</returns>
+    /// <exception cref="ArgumentNullException">When <paramref name="propertyNames"/> is <code>null</code>.</exception>
+    /// <exception cref="ArgumentNullException">When <paramref name="configureSink"/> is <code>null</code>.</exception>
+    public LoggerConfiguration Project(
+        IEnumerable<string> propertyNames,
+        Action<LoggerSinkConfiguration> configureSink)
+    {
+        Guard.AgainstNull(propertyNames);
+        Guard.AgainstNull(configureSink);
+
+        // Level aliases and so on don't need to be accepted here; if the user wants both projection and leveling, they
+        // can specify `restrictedToMinimumLevel` etc. in the wrapped sink configuration.
+        return Sink(Wrap(s => new ProjectingSink(s, propertyNames), configureSink));
+    }
+
+    /// <summary>
     /// Write to a sink, and if the sink is unable to record the event, write to a second sink. Additional sinks can
     /// be added to the chain if necessary.
     /// </summary>
